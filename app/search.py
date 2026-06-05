@@ -23,9 +23,50 @@ INDEX_DIR = Path("indexes")
 EMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 RRF_K       = 60        # RRF constant — higher = smoother rank fusion
 
+_STOPWORDS = {
+    # articles & determiners
+    "a", "an", "the", "this", "that", "these", "those", "some", "any",
+    "each", "every", "both", "all", "few", "more", "most", "other", "such",
+    # pronouns
+    "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
+    "us", "them", "my", "your", "his", "its", "our", "their",
+    "who", "whom", "whose", "which", "what", "where", "when", "why", "how",
+    "someone", "anyone", "everyone", "something", "anything",
+    # prepositions
+    "in", "on", "at", "to", "of", "for", "with", "by", "from", "into",
+    "onto", "out", "up", "over", "under", "about", "above", "below",
+    "between", "among", "through", "during", "before", "after", "since",
+    "without", "within", "against", "along", "across", "behind", "beyond",
+    "near", "off", "upon", "per", "via",
+    # conjunctions & linking words
+    "and", "or", "but", "so", "nor", "yet", "if", "as", "than", "then",
+    "while", "although", "because", "since", "unless", "until", "whether",
+    # auxiliary verbs
+    "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did",
+    "will", "would", "shall", "should", "may", "might", "must", "can", "could",
+    # common function words
+    "not", "no", "nor", "never", "there", "here", "also", "just", "even",
+    "still", "already", "always", "often", "now", "then", "too", "very",
+    "same", "later", "however",
+    # numbers as words
+    "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    # query-specific function words
+    "happens", "makes", "does",
+}
+
 
 def _tokenize(text: str) -> list[str]:
     return re.findall(r'\b\w+\b', text.lower())
+
+
+def _is_natural_language(query: str) -> bool:
+    """Returns True when the query reads like a sentence rather than keywords."""
+    tokens = _tokenize(query)
+    if len(tokens) < 6:
+        return False
+    sw_ratio = sum(1 for t in tokens if t in _STOPWORDS) / len(tokens)
+    return sw_ratio > 0.3
 
 
 class LegalSearchEngine:
@@ -100,15 +141,18 @@ class LegalSearchEngine:
     def hybrid_search(self, query: str, top_k: int = 10) -> list[dict]:
         # Run both searches at a larger pool to get stable rankings
         pool = max(top_k * 3, 50)
-        kw_results  = self.keyword_search(query,  top_k=pool)
         sem_results = self.semantic_search(query, top_k=pool)
 
         # RRF score: 1/(k + rank) accumulated per chunk_id
         rrf_scores: dict[str, float] = {}
 
-        for result in kw_results:
-            cid = result["chunk_id"]
-            rrf_scores[cid] = rrf_scores.get(cid, 0) + 1 / (RRF_K + result["rank"])
+        # Skip BM25 contribution for natural language queries — BM25 scores
+        # are noise when no exact tokens overlap, and pollute the RRF ranking.
+        if not _is_natural_language(query):
+            kw_results = self.keyword_search(query, top_k=pool)
+            for result in kw_results:
+                cid = result["chunk_id"]
+                rrf_scores[cid] = rrf_scores.get(cid, 0) + 1 / (RRF_K + result["rank"])
 
         for result in sem_results:
             cid = result["chunk_id"]
